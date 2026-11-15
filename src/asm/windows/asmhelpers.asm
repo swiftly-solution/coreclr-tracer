@@ -1,0 +1,96 @@
+EXTERN EnterStub:PROC
+EXTERN ExitStub:PROC
+EXTERN TailcallStub:PROC
+
+_text SEGMENT PARA 'CODE'
+
+ALIGN 16
+PUBLIC EnterNaked
+
+EnterNaked PROC FRAME
+
+    PUSH RAX
+    .PUSHREG RAX
+    PUSH RCX
+    .PUSHREG RCX
+    PUSH RDX
+    .PUSHREG RDX
+
+    SUB RSP, 20H
+    .ALLOCSTACK 20H
+
+    .ENDPROLOG
+
+    CALL EnterStub
+
+    ADD RSP, 20H
+
+    POP RDX
+    POP RCX
+    POP RAX
+
+    RET
+
+EnterNaked ENDP
+
+ALIGN 16
+PUBLIC ExitNaked
+
+ExitNaked PROC FRAME
+
+    PUSH RAX
+    .PUSHREG RAX
+    PUSH RCX
+    .PUSHREG RCX
+    PUSH RDX
+    .PUSHREG RDX
+
+    SUB RSP, 20H
+    .ALLOCSTACK 20H
+
+    .ENDPROLOG
+
+    CALL ExitStub
+
+    ADD RSP, 20H
+
+    POP RDX
+    POP RCX
+    POP RAX
+
+    RET
+
+ExitNaked ENDP
+
+ALIGN 16
+PUBLIC TailcallNaked
+
+TailcallNaked PROC FRAME
+
+    PUSH RAX
+    .PUSHREG RAX
+    PUSH RCX
+    .PUSHREG RCX
+    PUSH RDX
+    .PUSHREG RDX
+
+    SUB RSP, 20H
+    .ALLOCSTACK 20H
+
+    .ENDPROLOG
+
+    CALL TailcallStub
+
+    ADD RSP, 20H
+
+    POP RDX
+    POP RCX
+    POP RAX
+
+    RET
+
+TailcallNaked ENDP
+
+_text ENDS
+
+END
