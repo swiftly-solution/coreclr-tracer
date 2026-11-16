@@ -1,4 +1,5 @@
 add_rules("mode.debug", "mode.release")
+add_rules("plugin.compile_commands.autoupdate", { outputdir = ".", lsp = "clangd" })
 
 set_encodings("utf-8")
 set_optimize("aggressive")
@@ -7,7 +8,6 @@ target("coreclr-tracer")
     set_kind("shared")
     set_languages("cxx20")
     set_arch("x64")
-    add_rules("plugin.compile_commands.autoupdate", { outputdir = ".", lsp = "clangd" })
 
     add_files("src/**/*.cpp")
     add_files("src/*.cpp")

@@ -1,19 +1,27 @@
-#include "rpc.h"
+#include "coreclr/classfactory.h"
 #include "guiddef.h"
+#include "rpc.h"
 
-const IID CLSID_Profiler = {0x2e7d6025, 0x9ef7, 0x4942, {0xb3, 0x5e, 0x4a, 0x9d, 0x3c, 0x4a, 0xa0, 0x24}};
+const IID CLSID_Profiler = {0x2e7d6025,
+                            0x9ef7,
+                            0x4942,
+                            {0xb3, 0x5e, 0x4a, 0x9d, 0x3c, 0x4a, 0xa0, 0x24}};
 
-BOOL STDMETHODCALLTYPE DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
-{
-    return TRUE;
+BOOL STDMETHODCALLTYPE DllMain(HMODULE hModule, DWORD ul_reason_for_call,
+                               LPVOID lpReserved) {
+  return TRUE;
 }
 
-STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv)
-{
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv) {
+  if (ppv == nullptr || rclsid != CLSID_Profiler)
     return E_FAIL;
+
+  ClassFactory *factory = new ClassFactory();
+  HRESULT hr = factory->QueryInterface(riid, ppv);
+  if (FAILED(hr)) {
+    delete factory;
+  }
+  return hr;
 }
 
-STDAPI DllCanUnloadNow()
-{
-    return S_OK;
-}
+STDAPI DllCanUnloadNow() { return S_OK; }

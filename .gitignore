@@ -1,2 +1,5 @@
 build/
 .xmake/
+compile_commands.json
+test/bin/
+test/obj/
