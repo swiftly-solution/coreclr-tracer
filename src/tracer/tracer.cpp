@@ -107,6 +107,9 @@ public:
       if (s.seq.load(std::memory_order_relaxed) != before) {
         continue;
       }
+      if (copy.type == EventType::ObjectAllocated) {
+        continue;
+      }
       out.push_back(copy);
     }
     return out;
