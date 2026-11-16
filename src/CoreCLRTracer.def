@@ -1,3 +1,5 @@
 EXPORTS
     DllGetClassObject PRIVATE
     DllCanUnloadNow PRIVATE
+    GetTracer PRIVATE
+    TracerCrashSnapshot PRIVATE

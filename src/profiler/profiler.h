@@ -15,11 +15,6 @@ private:
   std::atomic<int> m_iRefCount;
   ICorProfilerInfo10 *m_pCoreProfilerInfo;
 
-  std::mutex m_classNamesMutex;
-  std::unordered_map<ClassID, std::wstring> m_classNames;
-
-  std::wstring GetCachedClassName(ClassID classId);
-
 public:
   CorProfiler();
   virtual ~CorProfiler();
@@ -263,9 +258,7 @@ public:
   ExceptionUnwindFunctionEnter(FunctionID functionId) override {
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE ExceptionUnwindFunctionLeave(void) override {
-    return S_OK;
-  }
+  HRESULT STDMETHODCALLTYPE ExceptionUnwindFunctionLeave(void) override;
   HRESULT STDMETHODCALLTYPE
   ExceptionUnwindFinallyEnter(FunctionID functionId) override {
     return S_OK;
@@ -298,9 +291,7 @@ public:
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE ThreadNameChanged(ThreadID threadId, ULONG cchName,
-                                              WCHAR name[]) override {
-    return S_OK;
-  }
+                                              WCHAR name[]) override;
   HRESULT STDMETHODCALLTYPE
   GarbageCollectionStarted(int cGenerations, BOOL generationCollected[],
                            COR_PRF_GC_REASON reason) override {

@@ -9,6 +9,8 @@ public static unsafe class Entrypoint
     private static readonly List<object> Keep = new();
     private static object? Sink;
 
+    static void CallVarArg() => VarArgHost.Va(1, __arglist());
+
     public static void Main(string[] args)
     {
         Keep.Add(new Plain());
@@ -168,10 +170,11 @@ public static unsafe class Entrypoint
         FuncHost<int>.Conv(1, (int x) => x.ToString());
         host.Ptr(null, null, null);
         host.Sp(default, default, null!, null!, (1, 1), null);
-        VarArgHost.Va(1, __arglist());
+        if (OperatingSystem.IsWindows()) CallVarArg();
         Sink = host + host;
         new FuncHost<int>.Nest<string>().M("u", 1);
 
+        Environment.ExitCode = ArgStress.Run() + TracerCheck.Run() == 0 ? 0 : 1;
         Console.WriteLine("Hello, World!");
         GC.KeepAlive(Keep);
     }

@@ -1,10 +1,13 @@
 #ifndef _src_coreclr_classfactory_h
 #define _src_coreclr_classfactory_h
 
-#include "unknwn.h"
 #include <atomic>
+#include <mutex>
+#include "unknwn.h"
+#ifdef _WIN32
 #include <unknwnbase.h>
 #include <winnt.h>
+#endif
 
 class ClassFactory : public IClassFactory
 {

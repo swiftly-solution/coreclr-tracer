@@ -12,12 +12,8 @@ target("coreclr-tracer")
     add_files("src/**/*.cpp")
     add_files("src/*.cpp")
 
-    add_rules("asm")
     if is_plat("windows") then
         add_files("src/*.def")
-        add_files("src/asm/windows/*.asm")
-    else
-        add_files("src/asm/systemv/*.S")
     end
 
     if is_plat("windows") then

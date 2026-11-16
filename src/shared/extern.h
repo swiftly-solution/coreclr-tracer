@@ -1,8 +1,15 @@
 #ifndef _src_shared_extern_h
 #define _src_shared_extern_h
 
-#ifndef _WIN32
+#include <atomic>
 #include <cstdlib>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#ifndef _WIN32
 #include "pal_mstypes.h"
 #include "pal.h"
 #include "ntimage.h"
