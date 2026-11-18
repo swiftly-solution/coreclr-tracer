@@ -13,6 +13,7 @@ class ClassFactory : public IClassFactory
 {
 private:
     std::atomic<int> refCount;
+
 public:
     ClassFactory();
     virtual ~ClassFactory();

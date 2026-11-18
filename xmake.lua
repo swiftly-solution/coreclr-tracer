@@ -2,7 +2,7 @@ add_rules("mode.debug", "mode.release")
 add_rules("plugin.compile_commands.autoupdate", { outputdir = ".", lsp = "clangd" })
 
 set_encodings("utf-8")
-set_optimize("smallest")
+set_optimize("aggressive")
 set_strip("all")
 set_policy("build.optimization.lto", true)
 

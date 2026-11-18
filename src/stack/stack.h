@@ -13,46 +13,47 @@
 #include <string>
 #include <vector>
 
-struct ArgumentInfo {
-  std::wstring name;
-  std::wstring type;
+struct ArgumentInfo
+{
+    std::wstring name;
+    std::wstring type;
 };
 
-struct FunctionInfo {
-  FunctionID functionId = 0;
-  ModuleID moduleId = 0;
-  ClassID classId = 0;
-  mdMethodDef token = 0;
-  bool isStatic = false;
+struct FunctionInfo
+{
+    FunctionID functionId = 0;
+    ModuleID moduleId = 0;
+    ClassID classId = 0;
+    mdMethodDef token = 0;
+    bool isStatic = false;
 
-  std::wstring className;
-  std::wstring classDefinition;
-  std::wstring methodName;
-  std::vector<std::wstring> methodTypeParams;
-  std::vector<std::wstring> methodTypeArgs;
-  std::wstring returnType;
-  std::vector<ArgumentInfo> args;
+    std::wstring className;
+    std::wstring classDefinition;
+    std::wstring methodName;
+    std::vector<std::wstring> methodTypeParams;
+    std::vector<std::wstring> methodTypeArgs;
+    std::wstring returnType;
+    std::vector<ArgumentInfo> args;
 };
 
-std::wstring GetClassName(ICorProfilerInfo2 *info, ClassID classId);
+std::wstring GetClassName(ICorProfilerInfo2* info, ClassID classId);
 
-std::wstring GetClassDefinitionName(ICorProfilerInfo2 *info, ClassID classId);
+std::wstring GetClassDefinitionName(ICorProfilerInfo2* info, ClassID classId);
 
-std::wstring GetTypeDefinitionName(IMetaDataImport2 *import, mdTypeDef typeDef);
+std::wstring GetTypeDefinitionName(IMetaDataImport2* import, mdTypeDef typeDef);
 
-std::wstring GetTypeSimpleName(IMetaDataImport2 *import, mdTypeDef typeDef);
+std::wstring GetTypeSimpleName(IMetaDataImport2* import, mdTypeDef typeDef);
 
-HRESULT GetFunctionInfo(ICorProfilerInfo2 *info, FunctionID functionId,
-                        FunctionInfo &out, COR_PRF_FRAME_INFO frameInfo = 0);
+HRESULT GetFunctionInfo(ICorProfilerInfo2* info, FunctionID functionId, FunctionInfo& out, COR_PRF_FRAME_INFO frameInfo = 0);
 
-std::wstring GetFunctionName(const FunctionInfo &fn);
+std::wstring GetFunctionName(const FunctionInfo& fn);
 
-std::wstring GetFunctionFullName(const FunctionInfo &fn);
+std::wstring GetFunctionFullName(const FunctionInfo& fn);
 
-std::wstring GetFunctionDefinition(const FunctionInfo &fn);
+std::wstring GetFunctionDefinition(const FunctionInfo& fn);
 
-std::vector<ArgumentInfo> GetFunctionArgs(const FunctionInfo &fn);
+std::vector<ArgumentInfo> GetFunctionArgs(const FunctionInfo& fn);
 
-std::wstring GetFunctionArgsString(const FunctionInfo &fn);
+std::wstring GetFunctionArgsString(const FunctionInfo& fn);
 
 #endif
