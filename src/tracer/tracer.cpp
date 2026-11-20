@@ -253,16 +253,17 @@ public:
         m_profiling.store(true, std::memory_order_release);
     }
 
-    std::vector<Event> TakeProfileSnapshot() override
+    size_t TakeProfileSnapshot(Event* out, size_t capacity) override
     {
         std::lock_guard<std::mutex> lock(m_profileMutex);
-        std::vector<Event> out = m_profile;
         Calib calib = MakeCalib();
-        for (Event& e : out)
+        size_t count = (std::min)(capacity, m_profile.size());
+        for (size_t i = 0; out && i < count; ++i)
         {
-            e.timestampNs = calib.ToNs(e.timestampNs);
+            out[i] = m_profile[i];
+            out[i].timestampNs = calib.ToNs(out[i].timestampNs);
         }
-        return out;
+        return m_profile.size();
     }
 
     void StopProfiling() override
