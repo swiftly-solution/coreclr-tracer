@@ -2,6 +2,7 @@
 #include "clock.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -67,17 +68,42 @@ struct Ring
 
 static std::mutex g_ringsMutex;
 static std::vector<Ring*> g_rings;
-static thread_local Ring* tl_ring = nullptr;
+static std::vector<Ring*> g_freeRings;
+
+struct RingGuard
+{
+    Ring* ring = nullptr;
+
+    ~RingGuard()
+    {
+        if (ring != nullptr)
+        {
+            std::lock_guard<std::mutex> lock(g_ringsMutex);
+            g_freeRings.push_back(ring);
+            ring = nullptr;
+        }
+    }
+};
+
+static thread_local RingGuard tl_guard;
 
 static Ring* CurrentRing()
 {
-    if (tl_ring == nullptr)
+    if (tl_guard.ring == nullptr)
     {
-        tl_ring = new Ring();
         std::lock_guard<std::mutex> lock(g_ringsMutex);
-        g_rings.push_back(tl_ring);
+        if (!g_freeRings.empty())
+        {
+            tl_guard.ring = g_freeRings.back();
+            g_freeRings.pop_back();
+        }
+        else
+        {
+            tl_guard.ring = static_cast<Ring*>(std::calloc(1, sizeof(Ring)));
+            g_rings.push_back(tl_guard.ring);
+        }
     }
-    return tl_ring;
+    return tl_guard.ring;
 }
 
 using ThreadEvents = std::map<uint32_t, std::vector<Event>>;
