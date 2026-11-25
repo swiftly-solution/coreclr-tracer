@@ -7,7 +7,9 @@
 #include "../tracer/tracer.h"
 #include "profiler.h"
 #include <atomic>
+#include <map>
 #include <mutex>
+#include <vector>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -216,6 +218,77 @@ static void RecordFunction(EventType type, FunctionID id, const FnSym& sym)
     RecordEvent(type, id, sym.addr, sym.nameId, sym.moduleNameId);
 }
 
+struct CodeRange
+{
+    uint64_t size;
+    uint32_t nameId;
+    uint32_t sourceId;
+    ModuleID module;
+};
+static std::shared_mutex g_codeMutex;
+static std::map<uint64_t, CodeRange> g_codeRanges;
+
+static void RegisterJitCode(ICorProfilerInfo10* info, FunctionID id)
+{
+    FunctionInfo fn;
+    if (FAILED(GetFunctionInfo(info, id, fn)) || !IsHookedModule(info, fn.moduleId))
+    {
+        return;
+    }
+    uint32_t nameId = InternString(ToUtf8(GetFunctionFullName(fn)));
+    uint32_t sourceId = InternString(ResolveModuleName(info, fn.moduleId));
+
+    std::vector<COR_PRF_CODE_INFO> chunks(4);
+    ULONG32 count = 0;
+    HRESULT hr = info->GetCodeInfo2(id, static_cast<ULONG32>(chunks.size()), &count, chunks.data());
+    if (count > chunks.size())
+    {
+        chunks.resize(count);
+        hr = info->GetCodeInfo2(id, count, &count, chunks.data());
+    }
+    if (FAILED(hr))
+    {
+        return;
+    }
+
+    std::unique_lock<std::shared_mutex> lock(g_codeMutex);
+    for (ULONG32 i = 0; i < count; ++i)
+    {
+        g_codeRanges[chunks[i].startAddress] = CodeRange{chunks[i].size, nameId, sourceId, fn.moduleId};
+    }
+}
+
+static void UnregisterModuleCode(ModuleID module)
+{
+    std::unique_lock<std::shared_mutex> lock(g_codeMutex);
+    for (auto it = g_codeRanges.begin(); it != g_codeRanges.end();)
+    {
+        it = it->second.module == module ? g_codeRanges.erase(it) : std::next(it);
+    }
+}
+
+bool ProfilerResolveAddress(uint64_t address, uint32_t& nameId, uint32_t& sourceId)
+{
+    std::shared_lock<std::shared_mutex> lock(g_codeMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+    {
+        return false;
+    }
+    auto it = g_codeRanges.upper_bound(address);
+    if (it == g_codeRanges.begin())
+    {
+        return false;
+    }
+    --it;
+    if (address - it->first >= it->second.size)
+    {
+        return false;
+    }
+    nameId = it->second.nameId;
+    sourceId = it->second.sourceId;
+    return true;
+}
+
 static UINT_PTR STDMETHODCALLTYPE FunctionMapper(FunctionID id, void*, BOOL* hook)
 {
     FunctionInfo fn;
@@ -362,7 +435,7 @@ HRESULT STDMETHODCALLTYPE CorProfiler::Initialize(IUnknown* pICorProfilerInfoUnk
     }
     g_info.store(m_pCoreProfilerInfo);
 
-    constexpr DWORD kEventMask = COR_PRF_MONITOR_ENTERLEAVE | COR_PRF_ENABLE_FUNCTION_ARGS | COR_PRF_MONITOR_THREADS | COR_PRF_MONITOR_CODE_TRANSITIONS | COR_PRF_MONITOR_EXCEPTIONS /*| COR_PRF_ENABLE_OBJECT_ALLOCATED*/;
+    constexpr DWORD kEventMask = COR_PRF_MONITOR_ENTERLEAVE | COR_PRF_ENABLE_FUNCTION_ARGS | COR_PRF_MONITOR_THREADS | COR_PRF_MONITOR_CODE_TRANSITIONS | COR_PRF_MONITOR_EXCEPTIONS | COR_PRF_MONITOR_JIT_COMPILATION | COR_PRF_MONITOR_MODULE_LOADS /*| COR_PRF_ENABLE_OBJECT_ALLOCATED*/;
 
     if (m_pCoreProfilerInfo->SetEventMask(kEventMask) != S_OK || FAILED(m_pCoreProfilerInfo->SetFunctionIDMapper2(FunctionMapper, nullptr)))
     {
@@ -455,6 +528,22 @@ HRESULT STDMETHODCALLTYPE CorProfiler::ManagedToUnmanagedTransition(FunctionID f
     if (reason == COR_PRF_TRANSITION_RETURN && functionId != 0)
     {
         RecordFunction(EventType::ManagedToUnmanaged, functionId, ResolveFunction(functionId));
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CorProfiler::ModuleUnloadStarted(ModuleID moduleId)
+{
+    UnregisterModuleCode(moduleId);
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CorProfiler::JITCompilationFinished(FunctionID functionId, HRESULT hrStatus, BOOL fIsSafeToBlock)
+{
+    ICorProfilerInfo10* info = g_info.load();
+    if (SUCCEEDED(hrStatus) && info != nullptr)
+    {
+        RegisterJitCode(info, functionId);
     }
     return S_OK;
 }

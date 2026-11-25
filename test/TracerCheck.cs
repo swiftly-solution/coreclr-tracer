@@ -1,5 +1,8 @@
+using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 
 public static unsafe class TracerCheck
 {
@@ -25,6 +28,7 @@ public static unsafe class TracerCheck
     static uint holdOs;
     static string holdName = "";
     static delegate* unmanaged[Cdecl]<nint, uint, byte*> gtn;
+    static delegate* unmanaged[Cdecl]<nint, ulong, byte*> fnName, fnSrc;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     static void Hold()
@@ -46,6 +50,51 @@ public static unsafe class TracerCheck
 
     static string S(uint id) => Marshal.PtrToStringUTF8((nint)getString(tracer, id)) ?? "";
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int Leaf(int x) => x + 1;
+
+    static Ev[] fbuf = new Ev[1 << 16];
+    static int fn_;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void Flood()
+    {
+        int s = 0;
+        for (int i = 0; i < 40000; i++) s += Leaf(i);
+        fixed (Ev* p = fbuf) fn_ = (int)snap(p, (nuint)fbuf.Length) + (s & 0);
+    }
+
+    static ulong unloadAddr;
+    static string unloadName = "";
+
+    public static int DynSnap()
+    {
+        fixed (Ev* p = fbuf) fn_ = (int)snap(p, (nuint)fbuf.Length);
+        var e = fbuf.Take(fn_).FirstOrDefault(e => e.Type == 0 && S(e.Name).Contains("UnloadMe"));
+        unloadAddr = e.B;
+        unloadName = S(e.Name);
+        return 0;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static WeakReference LoadAndRunCollectible()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"UnloadMe{Environment.ProcessId}.dll");
+        var ab = new PersistedAssemblyBuilder(new AssemblyName("UnloadMe"), typeof(object).Assembly);
+        var tb = ab.DefineDynamicModule("UnloadMe").DefineType("UnloadMe", TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed);
+        var il = tb.DefineMethod("Go", MethodAttributes.Public | MethodAttributes.Static, typeof(int), Type.EmptyTypes).GetILGenerator();
+        il.Emit(OpCodes.Call, typeof(TracerCheck).GetMethod(nameof(DynSnap))!);
+        il.Emit(OpCodes.Ldc_I4_1);        il.Emit(OpCodes.Add);
+        il.Emit(OpCodes.Ret);
+        tb.CreateType();
+        ab.Save(path);
+
+        var ctx = new AssemblyLoadContext("unload-check", isCollectible: true);
+        ctx.LoadFromAssemblyPath(path).GetType("UnloadMe")!.GetMethod("Go")!.Invoke(null, null);
+        ctx.Unload();
+        return new WeakReference(ctx);
+    }
+
     public static int Run()
     {
         var path = Environment.GetEnvironmentVariable("CORECLR_PROFILER_PATH");
@@ -57,6 +106,8 @@ public static unsafe class TracerCheck
         var snapshot = (delegate* unmanaged[Cdecl]<Ev*, nuint, nuint>)NativeLibrary.GetExport(lib, "TracerCrashSnapshot");
         snap = snapshot;
         gtn = (delegate* unmanaged[Cdecl]<nint, uint, byte*>)vt[7];
+        fnName = (delegate* unmanaged[Cdecl]<nint, ulong, byte*>)vt[10];
+        fnSrc = (delegate* unmanaged[Cdecl]<nint, ulong, byte*>)vt[11];
 
         var th = new Thread(() => { MarkerCall(); Hold(); }) { Name = "tracer-check" };
         th.Start();
@@ -125,6 +176,31 @@ public static unsafe class TracerCheck
         }
         Console.WriteLine($"  nest  : frames={nts.Count} ties={ties} min_delta={minD} ns max_delta={maxD} ns");
         if (nts.Count != 65 || backwards > 0 || ties > 0) bad++;
+
+        var nestEv = nbuf.Take(nn).FirstOrDefault(e => e.Type == 0 && S(e.Name).Contains("TracerCheck.Nest"));
+        string nameAt = Marshal.PtrToStringUTF8((nint)fnName(tracer, nestEv.B + 1)) ?? "";
+        string srcAt = Marshal.PtrToStringUTF8((nint)fnSrc(tracer, nestEv.B)) ?? "";
+        string nameNone = Marshal.PtrToStringUTF8((nint)fnName(tracer, 1)) ?? "?";
+        Console.WriteLine($"  addr  : Nest code=0x{nestEv.B:x} name='{nameAt}' source='{srcAt}' unknown='{nameNone}'");
+        if (nestEv.B == 0 || nameAt != S(nestEv.Name) || srcAt != S(nestEv.Source) || nameNone != "") bad++;
+
+        Flood();
+        bool floodKept = fbuf.Take(fn_).Any(e => e.Type == 0 && S(e.Name).Contains("TracerCheck.Flood"))
+                         && fbuf.Take(fn_).Any(e => e.Type == 0 && S(e.Name).Contains("TracerCheck.Run"));
+        Console.WriteLine($"  flood : outer frames kept after 40000 hooked calls={floodKept}");
+        if (!floodKept) bad++;
+
+        var alc = LoadAndRunCollectible();
+        string before = Marshal.PtrToStringUTF8((nint)fnName(tracer, unloadAddr + 1)) ?? "";
+        bool resolved = unloadAddr != 0 && before == unloadName && before.Contains("UnloadMe");
+        bool gone = false;
+        for (int i = 0; i < 100 && !gone; i++)
+        {
+            GC.Collect(); GC.WaitForPendingFinalizers(); Thread.Sleep(10);
+            gone = !alc.IsAlive && (Marshal.PtrToStringUTF8((nint)fnName(tracer, unloadAddr + 1)) ?? "") == "";
+        }
+        Console.WriteLine($"  unload: resolved='{before}' forgotten_after_unload={gone} contextAlive={alc.IsAlive}");
+        if (!resolved || !gone) bad++;
         Console.WriteLine($"  thread: os={holdOs} name='{holdName}'");
         if (holdName != "tracer-check") bad++;
         Console.WriteLine($"TracerCheck: bad={bad}");

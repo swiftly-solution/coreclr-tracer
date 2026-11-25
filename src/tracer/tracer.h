@@ -11,5 +11,6 @@ uint32_t InternString(std::string_view s);
 bool ProfilerSetObjectTracking(bool enabled);
 bool ProfilerObjectTracking();
 uint32_t ProfilerThreadNameId(uint32_t osThreadId);
+bool ProfilerResolveAddress(uint64_t address, uint32_t& nameId, uint32_t& sourceId);
 
 #endif
