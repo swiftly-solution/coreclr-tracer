@@ -97,7 +97,10 @@ public:
     {
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE ModuleUnloadStarted(ModuleID moduleId) override;
+    HRESULT STDMETHODCALLTYPE ModuleUnloadStarted(ModuleID moduleId) override
+    {
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE ModuleUnloadFinished(ModuleID moduleId, HRESULT hrStatus) override
     {
         return S_OK;
@@ -130,7 +133,10 @@ public:
     {
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE JITCompilationFinished(FunctionID functionId, HRESULT hrStatus, BOOL fIsSafeToBlock) override;
+    HRESULT STDMETHODCALLTYPE JITCompilationFinished(FunctionID functionId, HRESULT hrStatus, BOOL fIsSafeToBlock) override
+    {
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE JITCachedFunctionSearchStarted(FunctionID functionId, BOOL* pbUseCachedFunction) override
     {
         return S_OK;

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
-#include <cstring>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -19,7 +18,8 @@
 #include <unistd.h>
 #endif
 
-constexpr uint32_t kMaxOpen = 2048;
+constexpr size_t kRingSize = 1 << 14;
+constexpr size_t kRingMask = kRingSize - 1;
 
 static uint32_t CurrentOsThreadId()
 {
@@ -28,6 +28,82 @@ static uint32_t CurrentOsThreadId()
 #else
     return static_cast<uint32_t>(syscall(SYS_gettid));
 #endif
+}
+
+struct Slot
+{
+    std::atomic<uint64_t> seq{0};
+    Event ev{};
+};
+
+struct Ring
+{
+    std::atomic<uint64_t> head{0};
+    Slot slots[kRingSize];
+
+    void Push(const Event& e)
+    {
+        uint64_t ticket = head.load(std::memory_order_relaxed);
+        Slot& slot = slots[ticket & kRingMask];
+        slot.seq.store(2 * ticket + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        slot.ev = e;
+        slot.seq.store(2 * ticket + 2, std::memory_order_release);
+        head.store(ticket + 1, std::memory_order_release);
+    }
+
+    bool Read(uint64_t ticket, Event& out) const
+    {
+        const Slot& slot = slots[ticket & kRingMask];
+        uint64_t before = slot.seq.load(std::memory_order_acquire);
+        if (before != 2 * ticket + 2)
+        {
+            return false;
+        }
+        out = slot.ev;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return slot.seq.load(std::memory_order_relaxed) == before;
+    }
+};
+
+static std::mutex g_ringsMutex;
+static std::vector<Ring*> g_rings;
+static std::vector<Ring*> g_freeRings;
+
+struct RingGuard
+{
+    Ring* ring = nullptr;
+
+    ~RingGuard()
+    {
+        if (ring != nullptr)
+        {
+            std::lock_guard<std::mutex> lock(g_ringsMutex);
+            g_freeRings.push_back(ring);
+            ring = nullptr;
+        }
+    }
+};
+
+static thread_local RingGuard tl_guard;
+
+static Ring* CurrentRing()
+{
+    if (tl_guard.ring == nullptr)
+    {
+        std::lock_guard<std::mutex> lock(g_ringsMutex);
+        if (!g_freeRings.empty())
+        {
+            tl_guard.ring = g_freeRings.back();
+            g_freeRings.pop_back();
+        }
+        else
+        {
+            tl_guard.ring = static_cast<Ring*>(std::calloc(1, sizeof(Ring)));
+            g_rings.push_back(tl_guard.ring);
+        }
+    }
+    return tl_guard.ring;
 }
 
 using ThreadEvents = std::map<uint32_t, std::vector<Event>>;
@@ -42,129 +118,28 @@ static bool IsClosing(EventType type)
     return type == EventType::FunctionExit || type == EventType::FunctionTailcall || type == EventType::ManagedToUnmanaged;
 }
 
-struct OpenStack
+static void CloseOpenEvent(ThreadEvents& events, const Event& closing)
 {
-    std::atomic<uint32_t> seq{0};
-    std::atomic<uint32_t> depth{0};
-    uint32_t dropped = 0;
-    Event ev[kMaxOpen];
-
-    void BeginWrite()
+    EventType opening = closing.type == EventType::ManagedToUnmanaged ? EventType::UnmanagedToManaged : EventType::FunctionEnter;
+    auto it = events.find(closing.osThreadId);
+    if (it == events.end())
     {
-        seq.store(seq.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-        std::atomic_thread_fence(std::memory_order_release);
+        return;
     }
 
-    void EndWrite()
+    auto& open = it->second;
+    for (size_t i = open.size(); i-- > 0;)
     {
-        seq.store(seq.load(std::memory_order_relaxed) + 1, std::memory_order_release);
-    }
-
-    void Open(const Event& e)
-    {
-        BeginWrite();
-        uint32_t d = depth.load(std::memory_order_relaxed);
-        if (d < kMaxOpen)
+        if (open[i].type == opening && open[i].a == closing.a)
         {
-            ev[d] = e;
-            depth.store(d + 1, std::memory_order_relaxed);
-        }
-        else
-        {
-            ++dropped;
-        }
-        EndWrite();
-    }
-
-    void Close(const Event& closing)
-    {
-        EventType opening = closing.type == EventType::ManagedToUnmanaged ? EventType::UnmanagedToManaged : EventType::FunctionEnter;
-        BeginWrite();
-        uint32_t d = depth.load(std::memory_order_relaxed);
-        if (dropped > 0)
-        {
-            --dropped;
-        }
-        else
-        {
-            for (uint32_t i = d; i-- > 0;)
-            {
-                if (ev[i].type == opening && ev[i].a == closing.a)
-                {
-                    std::memmove(ev + i, ev + i + 1, (d - i - 1) * sizeof(Event));
-                    depth.store(d - 1, std::memory_order_relaxed);
-                    break;
-                }
-            }
-        }
-        EndWrite();
-    }
-
-    void Clear()
-    {
-        BeginWrite();
-        depth.store(0, std::memory_order_relaxed);
-        dropped = 0;
-        EndWrite();
-    }
-
-    uint32_t Copy(Event* out) const
-    {
-        uint32_t n = 0;
-        for (int tries = 0; tries < 16; ++tries)
-        {
-            uint32_t before = seq.load(std::memory_order_acquire);
-            n = (std::min)(depth.load(std::memory_order_relaxed), kMaxOpen);
-            std::copy_n(ev, n, out);
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if ((before & 1) == 0 && seq.load(std::memory_order_relaxed) == before)
-            {
-                break;
-            }
-        }
-        return n;
-    }
-};
-
-static std::mutex g_stacksMutex;
-static std::vector<OpenStack*> g_stacks;
-static std::vector<OpenStack*> g_freeStacks;
-
-struct StackGuard
-{
-    OpenStack* stack = nullptr;
-
-    ~StackGuard()
-    {
-        if (stack != nullptr)
-        {
-            stack->Clear();
-            std::lock_guard<std::mutex> lock(g_stacksMutex);
-            g_freeStacks.push_back(stack);
-            stack = nullptr;
+            open.erase(open.begin() + i);
+            break;
         }
     }
-};
-
-static thread_local StackGuard tl_guard;
-
-static OpenStack* CurrentStack()
-{
-    if (tl_guard.stack == nullptr)
+    if (open.empty())
     {
-        std::lock_guard<std::mutex> lock(g_stacksMutex);
-        if (!g_freeStacks.empty())
-        {
-            tl_guard.stack = g_freeStacks.back();
-            g_freeStacks.pop_back();
-        }
-        else
-        {
-            tl_guard.stack = static_cast<OpenStack*>(std::calloc(1, sizeof(OpenStack)));
-            g_stacks.push_back(tl_guard.stack);
-        }
+        events.erase(it);
     }
-    return tl_guard.stack;
 }
 
 class Tracer final : public ITracer
@@ -224,14 +199,7 @@ public:
 
     void Record(const Event& e)
     {
-        if (IsOpening(e.type))
-        {
-            CurrentStack()->Open(e);
-        }
-        else if (IsClosing(e.type))
-        {
-            CurrentStack()->Close(e);
-        }
+        CurrentRing()->Push(e);
 
         if (m_profiling.load(std::memory_order_acquire))
         {
@@ -245,23 +213,35 @@ public:
 
     ThreadEvents TakeCrashSnapshot() override
     {
-        std::vector<OpenStack*> stacks;
+        std::vector<Ring*> rings;
         {
-            std::lock_guard<std::mutex> lock(g_stacksMutex);
-            stacks = g_stacks;
+            std::lock_guard<std::mutex> lock(g_ringsMutex);
+            rings = g_rings;
         }
 
         Calib calib = MakeCalib();
-        std::vector<Event> buf(kMaxOpen);
         ThreadEvents out;
-        for (OpenStack* stack : stacks)
+        for (Ring* ring : rings)
         {
-            uint32_t n = stack->Copy(buf.data());
-            for (uint32_t i = 0; i < n; ++i)
+            uint64_t head = ring->head.load(std::memory_order_acquire);
+            uint64_t first = head > kRingSize ? head - kRingSize : 0;
+
+            for (uint64_t ticket = first; ticket < head; ++ticket)
             {
-                Event e = buf[i];
-                e.timestampNs = calib.ToNs(e.timestampNs);
-                out[e.osThreadId].push_back(e);
+                Event e;
+                if (!ring->Read(ticket, e))
+                {
+                    continue;
+                }
+                if (IsClosing(e.type))
+                {
+                    CloseOpenEvent(out, e);
+                }
+                else if (IsOpening(e.type))
+                {
+                    e.timestampNs = calib.ToNs(e.timestampNs);
+                    out[e.osThreadId].push_back(e);
+                }
             }
         }
         return out;
@@ -316,20 +296,6 @@ public:
     bool IsObjectTracking() override
     {
         return ProfilerObjectTracking();
-    }
-
-    const char* GetFunctionName(uint64_t address) override
-    {
-        uint32_t nameId = 0;
-        uint32_t sourceId = 0;
-        return ProfilerResolveAddress(address, nameId, sourceId) ? GetString(nameId) : "";
-    }
-
-    const char* GetFunctionSource(uint64_t address) override
-    {
-        uint32_t nameId = 0;
-        uint32_t sourceId = 0;
-        return ProfilerResolveAddress(address, nameId, sourceId) ? GetString(sourceId) : "";
     }
 
 private:
