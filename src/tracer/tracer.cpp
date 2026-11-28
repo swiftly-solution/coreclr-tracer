@@ -1,5 +1,7 @@
 #include "tracer.h"
 #include "clock.h"
+#include "profile_buffer.h"
+#include "profile_writer.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -39,6 +41,7 @@ struct Slot
 struct Ring
 {
     std::atomic<uint64_t> head{0};
+    std::atomic<ProfileBuffer*> profile{nullptr};
     Slot slots[kRingSize];
 
     void Push(const Event& e)
@@ -104,6 +107,105 @@ static Ring* CurrentRing()
         }
     }
     return tl_guard.ring;
+}
+
+static std::vector<ProfileBuffer*> ProfileBuffers()
+{
+    std::vector<ProfileBuffer*> out;
+    std::lock_guard<std::mutex> lock(g_ringsMutex);
+    for (Ring* ring : g_rings)
+    {
+        if (ProfileBuffer* buf = ring->profile.load(std::memory_order_acquire))
+        {
+            out.push_back(buf);
+        }
+    }
+    return out;
+}
+
+constexpr uint64_t kGoldenRatio64 = 0x9E3779B97F4A7C15ull;
+
+static size_t HashCombine(size_t seed, uint64_t value)
+{
+    return seed ^ (std::hash<uint64_t>{}(value) + kGoldenRatio64 + (seed << 6) + (seed >> 2));
+}
+
+struct FnKeyHash
+{
+    size_t operator()(const FnKey& key) const
+    {
+        size_t hash = std::hash<uint64_t>{}(key.a);
+        hash = HashCombine(hash, key.b);
+        hash = HashCombine(hash, key.nameId);
+        hash = HashCombine(hash, key.sourceId);
+        return hash;
+    }
+};
+
+class FnTable
+{
+public:
+    // Returns 0 when the table is full.
+    uint32_t Index(const FnKey& key)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_ids.find(key);
+        if (it != m_ids.end())
+        {
+            return it->second;
+        }
+
+        uint32_t id = m_count.load(std::memory_order_relaxed) + 1;
+        if (id > kChunk * kChunks)
+        {
+            return 0;
+        }
+
+        FnKey* chunk = m_chunks[(id - 1) / kChunk].load(std::memory_order_relaxed);
+        if (chunk == nullptr)
+        {
+            chunk = new FnKey[kChunk];
+            m_chunks[(id - 1) / kChunk].store(chunk, std::memory_order_relaxed);
+        }
+        chunk[(id - 1) % kChunk] = key;
+        m_ids.emplace(key, id);
+        m_count.store(id, std::memory_order_release);
+        return id;
+    }
+
+    FnKey Get(uint32_t id) const
+    {
+        if (id == 0 || id > m_count.load(std::memory_order_acquire))
+        {
+            return FnKey{};
+        }
+        return m_chunks[(id - 1) / kChunk].load(std::memory_order_relaxed)[(id - 1) % kChunk];
+    }
+
+private:
+    static constexpr uint32_t kChunk = 4096;
+    static constexpr uint32_t kChunks = 1024;
+
+    std::mutex m_mutex;
+    std::atomic<uint32_t> m_count{0};
+    std::atomic<FnKey*> m_chunks[kChunks]{};
+    std::unordered_map<FnKey, uint32_t, FnKeyHash> m_ids;
+};
+
+struct FnCacheEntry
+{
+    FnKey key;
+    uint32_t index;
+};
+
+constexpr unsigned kFnCacheBits = 8;
+constexpr size_t kFnCacheSize = size_t{1} << kFnCacheBits;
+
+static thread_local FnCacheEntry tl_fnCache[kFnCacheSize];
+
+static size_t FnCacheSlot(const FnKey& key)
+{
+    return static_cast<size_t>((key.a * kGoldenRatio64) >> (64 - kFnCacheBits));
 }
 
 using ThreadEvents = std::map<uint32_t, std::vector<Event>>;
@@ -199,15 +301,12 @@ public:
 
     void Record(const Event& e)
     {
-        CurrentRing()->Push(e);
+        Ring* ring = CurrentRing();
+        ring->Push(e);
 
         if (m_profiling.load(std::memory_order_acquire))
         {
-            std::lock_guard<std::mutex> lock(m_profileMutex);
-            if (m_profiling.load(std::memory_order_relaxed))
-            {
-                m_profile.push_back(e);
-            }
+            RecordProfile(ring, e);
         }
     }
 
@@ -249,28 +348,62 @@ public:
 
     void StartProfiling() override
     {
-        std::lock_guard<std::mutex> lock(m_profileMutex);
         m_profiling.store(true, std::memory_order_release);
     }
 
-    size_t TakeProfileSnapshot(Event* out, size_t capacity) override
+    bool WriteProfile(ProfileBlockWriter write, void* context) override
     {
-        std::lock_guard<std::mutex> lock(m_profileMutex);
-        Calib calib = MakeCalib();
-        size_t count = (std::min)(capacity, m_profile.size());
-        for (size_t i = 0; out && i < count; ++i)
+        if (write == nullptr)
         {
-            out[i] = m_profile[i];
-            out[i].timestampNs = calib.ToNs(out[i].timestampNs);
+            return false;
         }
-        return m_profile.size();
+
+        std::shared_lock<std::shared_mutex> saving(m_saveMutex);
+
+        std::vector<ProfileBuffer::View> views;
+        for (ProfileBuffer* buf : ProfileBuffers())
+        {
+            std::lock_guard<std::mutex> lock(buf->mutex);
+            ProfileBuffer::View view = buf->Freeze();
+            if (!view.Empty())
+            {
+                views.push_back(view);
+            }
+        }
+
+        Calib calib = MakeCalib();
+        uint64_t endOfTraceTicks = 0;
+        for (const ProfileBuffer::View& view : views)
+        {
+            endOfTraceTicks = (std::max)(endOfTraceTicks, view.LastTimestamp());
+        }
+
+        ProfileWriter writer(write, context);
+        auto resolve = [this](uint32_t index) { return m_fns.Get(index); };
+        for (const ProfileBuffer::View& view : views)
+        {
+            view.ForEach(resolve, [&](const Event& e) {
+                writer.Add(e, calib.ToNs(e.timestampNs));
+            });
+            if (writer.Failed())
+            {
+                return false;
+            }
+        }
+
+        uint32_t stringCount = m_stringCount.load(std::memory_order_acquire);
+        return writer.Finish(calib.ToNs(endOfTraceTicks), stringCount, ProfilerThreadNameId, [this](uint32_t id) { return std::string_view(GetString(id)); });
     }
 
     void StopProfiling() override
     {
-        std::lock_guard<std::mutex> lock(m_profileMutex);
         m_profiling.store(false, std::memory_order_release);
-        std::vector<Event>().swap(m_profile);
+        std::unique_lock<std::shared_mutex> saving(m_saveMutex);
+        for (ProfileBuffer* buf : ProfileBuffers())
+        {
+            std::lock_guard<std::mutex> lock(buf->mutex);
+            buf->Clear();
+        }
     }
 
     void CustomBegin(const char* name, const char* source) override
@@ -299,9 +432,60 @@ public:
     }
 
 private:
+    uint32_t FunctionIndex(const Event& e)
+    {
+        FnKey key{e.a, e.b, e.nameId, e.sourceId};
+        FnCacheEntry& cached = tl_fnCache[FnCacheSlot(key)];
+        if (cached.index != 0 && cached.key == key)
+        {
+            return cached.index;
+        }
+
+        uint32_t index = m_fns.Index(key);
+        if (index != 0)
+        {
+            cached = FnCacheEntry{key, index};
+        }
+        return index;
+    }
+
+    void RecordProfile(Ring* ring, const Event& e)
+    {
+        ProfileBuffer* buf = ring->profile.load(std::memory_order_relaxed);
+        if (buf == nullptr)
+        {
+            buf = new ProfileBuffer();
+            ring->profile.store(buf, std::memory_order_release);
+        }
+
+        uint32_t fn = 0;
+        if (IsFunctionEvent(e.type))
+        {
+            fn = FunctionIndex(e);
+            if (fn == 0)
+            {
+                return;
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(buf->mutex);
+        if (!m_profiling.load(std::memory_order_relaxed))
+        {
+            return;
+        }
+        if (fn != 0)
+        {
+            buf->AppendFunction(e.timestampNs, e.type, e.osThreadId, fn);
+        }
+        else
+        {
+            buf->AppendEvent(e);
+        }
+    }
+
     std::atomic<bool> m_profiling{false};
-    std::mutex m_profileMutex;
-    std::vector<Event> m_profile;
+    std::shared_mutex m_saveMutex;
+    FnTable m_fns;
 
     static constexpr uint32_t kStringChunk = 1024;
     static constexpr uint32_t kStringChunks = 1024;
